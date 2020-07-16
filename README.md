@@ -28,3 +28,35 @@ Display information for localhost on a specific port:
 Display information for specific IPv4 and v6 addresses:
 
 	tls-info 2002:0a00:0001::0a00:0001:44321 10.0.0.1:44321
+
+
+Example output:
+
+```
+=============================== localhost:48189 ===============================
+
+Resolved Host Name: localhost
+TLS Version: Tls12
+Key Exchange Algorithm: Ecdhe
+Cipher Algorithm: Aes256
+Hash Algorithm: Sha384
+Certificate:
+
+[Subject]
+  CN=localhost
+
+[Issuer]
+  CN=localhost
+
+[Serial Number]
+  0123456789ABCDEF01
+
+[Not Before]
+  01/01/2020 13:48:42
+
+[Not After]
+  01/01/2021 13:48:42
+
+[Thumbprint]
+  FEDCBA9876543210FEDCBA9876543210FEDCBA98
+```
