@@ -3,6 +3,11 @@
 A simple command line tool for displaying information about a TLS connection. The tool is largely based on [this Stack Overflow answer](https://stackoverflow.com/a/48675492). 
 
 
+## Building the Tool
+
+Run `dotnet build` from the command line. This will build executables for .NET Framework and .NET Core.
+
+
 ## Usage
 
 Run `tls-info <host name> [<host name 2> ... <host name N>]`. For each host name provided, the tool will attempt to create a connection using a `TcpClient` and an `SslStream`, and then display information about the selected cipher suite and the remote server certificate. Where no port is specified in the host name, port 443 will be used.
