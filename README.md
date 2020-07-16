@@ -15,7 +15,7 @@ Run `tls-info <host name> [<host name 2> ... <host name N>]`. For each host name
 
 ## Examples
 
-Display information for Google and LinkedId:
+Display information for Google and LinkedIn:
 
 	tls-info www.google.com www.linkedin.com
 
