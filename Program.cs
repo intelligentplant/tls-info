@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Security;
@@ -9,6 +10,9 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 
 namespace TlsInfo {
     class Program {
@@ -23,16 +27,29 @@ namespace TlsInfo {
 
 
         static async Task Main(string[] args) {
+            Console.WriteLine();
+
+#if NETCOREAPP
+            WriteLineWithColour($"[tls-info ({System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription})]", ConsoleColor.DarkGreen);
+#else
+            var attr = (System.Runtime.Versioning.TargetFrameworkAttribute) System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof(System.Runtime.Versioning.TargetFrameworkAttribute), false).FirstOrDefault();
+            WriteLineWithColour($"[tls-info ({attr?.FrameworkDisplayName ?? System.Runtime.InteropServices.RuntimeEnvironment.GetSystemVersion()})]", ConsoleColor.DarkGreen);
+#endif
+            Console.WriteLine();
+
             if (args.Length == 0) {
                 Console.WriteLine("No host names specified!");
+                return;
             }
 
-            foreach (var hostName in args) {
-                Console.WriteLine();
-                WriteLineWithColour(GetHeader(hostName), ConsoleColor.DarkGreen);
-                Console.WriteLine();
-                
-                try {
+            var results = new HostResultDictionary();
+
+            try {
+
+                foreach (var hostName in args) {
+                    var tlsResults = new TlsResultDictionary();
+                    results[hostName] = tlsResults;
+
                     string host;
                     var port = DefaultPortNumber;
 
@@ -57,52 +74,86 @@ namespace TlsInfo {
                         var dnsEntry = await Dns.GetHostEntryAsync(host).ConfigureAwait(false);
                         resolvedHostNameOrIp = dnsEntry.HostName;
                     }
-                    
-                    Console.WriteLine($"Resolved Host Name: {resolvedHostNameOrIp}");
-                    
-                    using (var tcpClient = new TcpClient(resolvedHostNameOrIp, port))
-                    using (var sslStream = new SslStream(tcpClient.GetStream(), false, ValidateServerCertificate, null)) {
-                        await sslStream.AuthenticateAsClientAsync(
-                            resolvedHostNameOrIp,
-                            null,
-                            SslProtocols.Tls12,
-                            true
-                        ).ConfigureAwait(false);
 
-                        var tlsInfo = new TlsInfo(sslStream);
-                        Console.WriteLine($"TLS Version: {tlsInfo.ProtocolVersion}");
-                        Console.WriteLine($"Key Exchange Algorithm: {tlsInfo.KeyExchangeAlgorithm}");
-                        Console.WriteLine($"Cipher Algorithm: {tlsInfo.CipherAlgorithm}");
-                        Console.WriteLine($"Hash Algorithm: {tlsInfo.HashAlgorithm}");
-                        Console.WriteLine("Certificate:");
-                        Console.WriteLine();
-                        Console.WriteLine(tlsInfo.RemoteCertificate.ToString(false));
+                    tlsResults.ResolvedHostName = resolvedHostNameOrIp;
+
+                    var tlsVersions = new[] { 
+#if NETCOREAPP || NET48_OR_GREATER
+                        SslProtocols.Tls13,
+#endif
+                        SslProtocols.Tls12,
+                        SslProtocols.Tls11,
+                        SslProtocols.Tls
+                    };
+
+                    foreach (var tlsVersion in tlsVersions) {
+                        try {
+                            using (var tcpClient = new TcpClient(host, port))
+                            using (var sslStream = new SslStream(tcpClient.GetStream(), false, ValidateServerCertificate, null)) {
+                                await sslStream.AuthenticateAsClientAsync(
+                                    host,
+                                    null,
+                                    tlsVersion,
+                                    true
+                                ).ConfigureAwait(false);
+
+                                var cert = new X509Certificate2(sslStream.RemoteCertificate);
+
+                                string publicKeyAlg;
+#if NET452
+                                var publicKeyOid = Oid.FromOidValue(cert.GetKeyAlgorithm(), OidGroup.PublicKeyAlgorithm);
+                                publicKeyAlg = publicKeyOid.FriendlyName;
+#else
+                                try {
+                                    var rsa = cert.GetRSAPublicKey();
+                                    publicKeyAlg = string.Concat("RSA (", rsa.KeySize, " bits)");
+                                    
+                                }
+                                catch {
+                                    var ecdsa = cert.GetECDsaPublicKey();
+#if NET472_OR_GREATER || NETCOREAPP
+                                    var ecParams = ecdsa.ExportParameters(false);
+                                    publicKeyAlg = string.Concat("ECC (", ecParams.Curve.Oid.FriendlyName ?? ecParams.Curve.Oid.Value, "; ", ecdsa.KeySize, " bits)");
+#else
+                                    publicKeyAlg = string.Concat("ECC (", ecdsa.KeySize, " bits)");
+#endif
+                                }
+#endif
+
+                                    tlsResults.Results[tlsVersion] = new TlsResult() {
+                                    CipherAlgorithm = sslStream.CipherAlgorithm,
+                                    HashAlgorithm = sslStream.HashAlgorithm,
+                                    KeyExchangeAlgorithm = (KeyExchangeAlgorithmType) sslStream.KeyExchangeAlgorithm,
+                                    Certificate = new X509CertificateInfo() {
+                                        Issuer = cert.Issuer,
+                                        PublicKeyAlgorithm = publicKeyAlg,
+                                        NotAfter = cert.GetExpirationDateString(),
+                                        NotBefore = cert.GetEffectiveDateString(),
+                                        SignatureAlgorithm = cert.SignatureAlgorithm?.FriendlyName ?? cert.SignatureAlgorithm?.Value,
+                                        Subject = cert.Subject,
+                                        Thumbprint = cert.GetCertHashString()
+                                    }
+                                };
+                            }
+                        }
+                        catch (Exception e) {
+                            var errors = new List<string>();
+                            do {
+                                errors.Add(e.Message);
+                                e = e.InnerException;
+                            } while (e != null);
+                            tlsResults.Results[tlsVersion] = new { Errors = errors.ToArray() };
+                        }
                     }
+
                 }
-                catch (Exception e) {
-                    WriteLineWithColour(e.ToString(), ConsoleColor.DarkRed);
-                    Console.WriteLine();
-                }
+
+                Console.WriteLine(JsonConvert.SerializeObject(results, Formatting.Indented, new StringEnumConverter()));
             }
-        }
-
-
-        private static string GetHeader(string hostName) {
-            var result = new StringBuilder();
-
-            var padding = (ScreenWidth - hostName.Length - 2) / 2;
-
-            if (padding > 0) {
-                result.Append(Enumerable.Repeat('=', padding).ToArray());
-                result.Append(' ');
+            catch (Exception e) {
+                WriteLineWithColour(e.ToString(), ConsoleColor.DarkRed);
+                return;
             }
-            result.Append(hostName);
-            if (padding > 0) {
-                result.Append(' ');
-                result.Append(Enumerable.Repeat('=', padding).ToArray());
-            }
-
-            return result.ToString();
         }
 
 
@@ -112,9 +163,9 @@ namespace TlsInfo {
             X509Chain chain,
             SslPolicyErrors sslPolicyErrors
         ) {
-            if (sslPolicyErrors != SslPolicyErrors.None) {
-                WriteLineWithColour($"SSL Policy Error: {sslPolicyErrors}", ConsoleColor.DarkYellow);
-            }
+            //if (sslPolicyErrors != SslPolicyErrors.None) {
+            //    WriteLineWithColour($"SSL Policy Error: {sslPolicyErrors}", ConsoleColor.DarkYellow);
+            //}
             return true;
         }
 
@@ -150,22 +201,35 @@ namespace TlsInfo {
         }
 
 
-        public class TlsInfo {
+        public class HostResultDictionary : Dictionary<string, TlsResultDictionary> {
 
-            public SslProtocols ProtocolVersion { get; set; }
+            public HostResultDictionary() : base(StringComparer.OrdinalIgnoreCase) { }
+
+        }
+
+
+        public class TlsResultDictionary {
+            public string ResolvedHostName { get; set; }
+            public IDictionary<SslProtocols, object> Results { get; } = new Dictionary<SslProtocols, object>();
+        }
+
+
+        public class TlsResult {
             public KeyExchangeAlgorithmType KeyExchangeAlgorithm { get; set; }
             public CipherAlgorithmType CipherAlgorithm { get; set; }
             public HashAlgorithmType HashAlgorithm { get; set; }
-            public X509Certificate2 RemoteCertificate { get; set; }
-            
-            public TlsInfo(SslStream SecureStream) {
-                ProtocolVersion = SecureStream.SslProtocol;
-                KeyExchangeAlgorithm = (KeyExchangeAlgorithmType)SecureStream.KeyExchangeAlgorithm;
-                CipherAlgorithm = SecureStream.CipherAlgorithm;
-                HashAlgorithm = SecureStream.HashAlgorithm;
-                RemoteCertificate = new X509Certificate2(SecureStream.RemoteCertificate);
-            }
-            
+            public X509CertificateInfo Certificate { get; set; }
+        }
+
+
+        public class X509CertificateInfo {
+            public string Subject { get; set; }
+            public string Issuer { get; set; }
+            public string NotBefore { get; set; }
+            public string NotAfter { get; set; }
+            public string PublicKeyAlgorithm { get; set; }
+            public string SignatureAlgorithm { get; set; }
+            public string Thumbprint { get; set; }
         }
 
 
